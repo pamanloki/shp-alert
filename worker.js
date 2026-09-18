@@ -58,7 +58,8 @@ function normalizeUrl(raw) {
     return null;
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-  if (!/shopee\./i.test(parsed.hostname)) return null; // batasi ke domain Shopee
+  // batasi ke domain Shopee, termasuk link pendek (shp.ee / s.shopee.co.id)
+  if (!/(^|\.)shopee\.|(^|\.)shp\.ee$/i.test(parsed.hostname)) return null;
   return parsed.toString();
 }
 
@@ -216,10 +217,13 @@ async function buildReply(textIn) {
   return formatTelegram(info);
 }
 
-// Ambil URL Shopee pertama dari teks bebas.
+// Ambil URL Shopee pertama dari teks bebas (termasuk link pendek shp.ee).
 function extractShopeeLink(s) {
-  const m = s.match(/https?:\/\/[^\s]*shopee\.[^\s]+/i);
-  return m ? m[0] : null;
+  const urls = s.match(/https?:\/\/[^\s]+/gi) || [];
+  for (const u of urls) {
+    if (normalizeUrl(u)) return u;
+  }
+  return null;
 }
 
 // Ambil harga produk; kembalikan objek terstruktur (bukan dump debug).
