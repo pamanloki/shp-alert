@@ -1,12 +1,24 @@
-// Probe: cek apakah Shopee mau ngasih harga produk ke Cloudflare Worker.
-// Deploy sebagai Worker baru, lalu buka:
-//   https://<worker-url>/?u=<link produk shopee>
-// Tujuannya cuma diagnosa: berhasil dapat harga, atau diblok anti-bot.
+// Shopee price bot untuk Cloudflare Worker.
+//
+// Dua fungsi:
+//  1) Probe/diagnosa:  GET  https://<worker-url>/?u=<link produk shopee>
+//  2) Bot Telegram:    POST dari webhook Telegram (kirim link Shopee ke bot -> dibalas harga)
+//
+// Secrets yang perlu diset (wrangler secret put / dashboard):
+//  - BOT_TOKEN            : token dari @BotFather
+//  - TELEGRAM_SECRET      : token rahasia webhook (opsional tapi disarankan)
 
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
+    // Webhook Telegram datang sebagai POST.
+    if (request.method === "POST") {
+      return handleTelegram(request, env);
+    }
+
     const u = new URL(request.url).searchParams.get("u");
-    if (!u) return text("Shopee price probe.\nPakai: /?u=<link produk shopee>");
+    if (!u) {
+      return text("Shopee price bot.\nProbe: /?u=<link produk shopee>\nTelegram: kirim link Shopee ke bot.");
+    }
     try {
       return text(await probe(u));
     } catch (e) {
@@ -136,4 +148,133 @@ function micro(v) {
 function fmtRp(n) {
   if (n == null || !isFinite(n)) return "?";
   return "Rp" + Math.round(n).toLocaleString("id-ID");
+}
+
+// ---------------------------------------------------------------------------
+// Telegram bot
+// ---------------------------------------------------------------------------
+
+async function handleTelegram(request, env) {
+  // Verifikasi bahwa request memang dari Telegram (kalau TELEGRAM_SECRET diset).
+  if (env.TELEGRAM_SECRET) {
+    const got = request.headers.get("x-telegram-bot-api-secret-token");
+    if (got !== env.TELEGRAM_SECRET) return new Response("forbidden", { status: 403 });
+  }
+
+  let update;
+  try {
+    update = await request.json();
+  } catch {
+    return new Response("bad request", { status: 400 });
+  }
+
+  const msg = update.message || update.edited_message;
+  const chatId = msg && msg.chat && msg.chat.id;
+  const textIn = (msg && msg.text) || "";
+
+  // Selalu balas 200 ke Telegram supaya update tidak dikirim ulang terus-menerus.
+  if (!chatId) return new Response("ok");
+
+  try {
+    const reply = await buildReply(textIn);
+    await sendMessage(env, chatId, reply);
+  } catch (e) {
+    await sendMessage(env, chatId, "Maaf, terjadi error: " + (e && e.message ? e.message : e));
+  }
+  return new Response("ok");
+}
+
+// Susun balasan bot dari teks pesan masuk.
+async function buildReply(textIn) {
+  const t = textIn.trim();
+  if (t === "/start" || t === "/help") {
+    return "Halo! Kirim link produk Shopee, nanti aku balas harga terkininya.";
+  }
+
+  const link = extractShopeeLink(t);
+  if (!link) return "Kirim link produk Shopee ya (mis. https://shopee.co.id/...-i.123.456).";
+
+  const info = await lookupPrice(link);
+  return formatTelegram(info);
+}
+
+// Ambil URL Shopee pertama dari teks bebas.
+function extractShopeeLink(s) {
+  const m = s.match(/https?:\/\/[^\s]*shopee\.[^\s]+/i);
+  return m ? m[0] : null;
+}
+
+// Ambil harga produk; kembalikan objek terstruktur (bukan dump debug).
+async function lookupPrice(rawLink) {
+  const link = normalizeUrl(rawLink);
+  if (!link) return { ok: false, message: "URL tidak valid atau bukan domain Shopee." };
+
+  let finalUrl = link;
+  try {
+    const r0 = await fetchWithTimeout(link, { headers: { "User-Agent": UA }, redirect: "follow" });
+    finalUrl = r0.url || link;
+    await r0.text().catch(() => "");
+  } catch {
+    /* lanjut pakai link asli */
+  }
+
+  const ids = extractIds(finalUrl) || extractIds(link);
+  if (!ids) return { ok: false, message: "Gagal mengambil shopid/itemid dari URL." };
+
+  const { shopid, itemid } = ids;
+  const api = `https://shopee.co.id/api/v4/item/get?itemid=${itemid}&shopid=${shopid}`;
+  const r = await fetchWithTimeout(api, {
+    headers: {
+      "User-Agent": UA,
+      "Referer": finalUrl,
+      "Accept": "application/json",
+      "x-api-source": "pc",
+      "x-shopee-language": "id",
+    },
+  });
+
+  let j;
+  try {
+    j = JSON.parse(await r.text());
+  } catch {
+    return { ok: false, message: "Shopee tidak mengembalikan JSON (kemungkinan diblok anti-bot)." };
+  }
+
+  if (!j.data) return { ok: false, message: `Shopee error: ${j.error} ${j.error_msg || ""}`.trim() };
+  return { ok: true, data: j.data };
+}
+
+// Format balasan bot untuk data produk.
+function formatTelegram(info) {
+  if (!info.ok) return info.message;
+  const d = info.data;
+
+  const lines = [`🛒 ${d.name}`];
+  const min = micro(d.price_min);
+  const max = micro(d.price_max);
+  if (min != null && max != null && min !== max) {
+    lines.push(`Harga : ${fmtRp(min)} – ${fmtRp(max)}`);
+  } else {
+    lines.push(`Harga : ${fmtRp(micro(d.price))}`);
+  }
+  lines.push(`Stok  : ${d.stock}`);
+
+  if (Array.isArray(d.models) && d.models.length) {
+    lines.push(`\nVarian:`);
+    for (const mdl of d.models) {
+      lines.push(`• ${mdl.name}: ${fmtRp(micro(mdl.price))} (stok ${mdl.stock})`);
+    }
+  }
+  return lines.join("\n");
+}
+
+// Kirim pesan balik ke Telegram.
+async function sendMessage(env, chatId, text) {
+  if (!env.BOT_TOKEN) throw new Error("BOT_TOKEN belum diset");
+  const url = `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
+  await fetchWithTimeout(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+  });
 }
