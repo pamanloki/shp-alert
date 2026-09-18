@@ -7,6 +7,8 @@
 // Secrets yang perlu diset (wrangler secret put / dashboard):
 //  - BOT_TOKEN            : token dari @BotFather
 //  - TELEGRAM_SECRET      : token rahasia webhook (opsional tapi disarankan)
+//  - ALLOWED_IDS          : daftar ID user/chat yang boleh pakai, dipisah koma
+//                           (opsional; kosong = terbuka untuk semua)
 
 export default {
   async fetch(request, env) {
@@ -170,10 +172,18 @@ async function handleTelegram(request, env) {
 
   const msg = update.message || update.edited_message;
   const chatId = msg && msg.chat && msg.chat.id;
+  const fromId = msg && msg.from && msg.from.id;
   const textIn = (msg && msg.text) || "";
 
   // Selalu balas 200 ke Telegram supaya update tidak dikirim ulang terus-menerus.
   if (!chatId) return new Response("ok");
+
+  // Batasi ke pengguna tertentu kalau ALLOWED_IDS diset (mis. "12345,67890").
+  // Kalau kosong/tak diset, bot terbuka untuk semua.
+  if (!isAllowed(env, fromId, chatId)) {
+    await sendMessage(env, chatId, "Maaf, bot ini privat.");
+    return new Response("ok");
+  }
 
   try {
     const reply = await buildReply(textIn);
@@ -182,6 +192,14 @@ async function handleTelegram(request, env) {
     await sendMessage(env, chatId, "Maaf, terjadi error: " + (e && e.message ? e.message : e));
   }
   return new Response("ok");
+}
+
+// Cek apakah pengirim diizinkan. ALLOWED_IDS = daftar ID dipisah koma.
+function isAllowed(env, fromId, chatId) {
+  const raw = (env.ALLOWED_IDS || "").trim();
+  if (!raw) return true; // tidak diset -> terbuka untuk semua
+  const allow = raw.split(",").map((s) => s.trim()).filter(Boolean);
+  return allow.includes(String(fromId)) || allow.includes(String(chatId));
 }
 
 // Susun balasan bot dari teks pesan masuk.
