@@ -51,14 +51,17 @@ async function fetchWithTimeout(url, options = {}) {
 }
 
 // Fetch ke Shopee; kalau SCRAPER_API_KEY ada, lewatkan ScraperAPI supaya
-// tidak diblok anti-bot (IP Indonesia + header diteruskan).
+// tidak diblok anti-bot. country_code hanya dipakai kalau SCRAPER_COUNTRY diset
+// (geotargeting fitur berbayar; kosongkan agar jalan di plan gratis).
 async function shopeeFetch(targetUrl, env, headers = {}) {
   if (env && env.SCRAPER_API_KEY) {
-    const proxied =
+    let proxied =
       "https://api.scraperapi.com/?" +
       `api_key=${encodeURIComponent(env.SCRAPER_API_KEY)}` +
       `&url=${encodeURIComponent(targetUrl)}` +
-      `&country_code=id&keep_headers=true`;
+      `&keep_headers=true`;
+    const country = (env.SCRAPER_COUNTRY || "").trim();
+    if (country) proxied += `&country_code=${encodeURIComponent(country)}`;
     return fetchWithTimeout(proxied, { headers });
   }
   return fetchWithTimeout(targetUrl, { headers });
@@ -267,11 +270,16 @@ async function lookupPrice(rawLink, env) {
     "x-shopee-language": "id",
   });
 
+  const raw = await r.text();
   let j;
   try {
-    j = JSON.parse(await r.text());
+    j = JSON.parse(raw);
   } catch {
-    return { ok: false, message: "Shopee tidak mengembalikan JSON (kemungkinan diblok anti-bot)." };
+    const snippet = raw.slice(0, 200).replace(/\s+/g, " ").trim();
+    return {
+      ok: false,
+      message: `Bukan JSON (HTTP ${r.status}). Respons: ${snippet || "(kosong)"}`,
+    };
   }
 
   if (!j.data) return { ok: false, message: `Shopee error: ${j.error} ${j.error_msg || ""}`.trim() };
