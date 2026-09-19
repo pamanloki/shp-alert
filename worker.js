@@ -9,6 +9,8 @@
 //  - TELEGRAM_SECRET      : token rahasia webhook (opsional tapi disarankan)
 //  - ALLOWED_IDS          : daftar ID user/chat yang boleh pakai, dipisah koma
 //                           (opsional; kosong = terbuka untuk semua)
+//  - SCRAPER_API_KEY       : API key ScraperAPI, biar request ke Shopee lolos
+//                           anti-bot (opsional; kosong = request langsung)
 
 export default {
   async fetch(request, env) {
@@ -22,7 +24,7 @@ export default {
       return text("Shopee price bot.\nProbe: /?u=<link produk shopee>\nTelegram: kirim link Shopee ke bot.");
     }
     try {
-      return text(await probe(u));
+      return text(await probe(u, env));
     } catch (e) {
       return text("ERROR: " + (e && e.message ? e.message : e));
     }
@@ -46,6 +48,20 @@ function text(s) {
 // fetch dengan timeout, supaya request yang macet tetap gagal dengan rapi.
 async function fetchWithTimeout(url, options = {}) {
   return fetch(url, { ...options, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+}
+
+// Fetch ke Shopee; kalau SCRAPER_API_KEY ada, lewatkan ScraperAPI supaya
+// tidak diblok anti-bot (IP Indonesia + header diteruskan).
+async function shopeeFetch(targetUrl, env, headers = {}) {
+  if (env && env.SCRAPER_API_KEY) {
+    const proxied =
+      "https://api.scraperapi.com/?" +
+      `api_key=${encodeURIComponent(env.SCRAPER_API_KEY)}` +
+      `&url=${encodeURIComponent(targetUrl)}` +
+      `&country_code=id&keep_headers=true`;
+    return fetchWithTimeout(proxied, { headers });
+  }
+  return fetchWithTimeout(targetUrl, { headers });
 }
 
 // Validasi & normalisasi input jadi URL http(s) yang wajar.
@@ -72,7 +88,7 @@ function extractIds(s) {
   return null;
 }
 
-async function probe(rawLink) {
+async function probe(rawLink, env) {
   const link = normalizeUrl(rawLink);
   if (!link) return `LINK : ${rawLink}\n\nURL tidak valid atau bukan domain Shopee.`;
 
@@ -91,14 +107,12 @@ async function probe(rawLink) {
 
   const { shopid, itemid } = ids;
   const api = `https://shopee.co.id/api/v4/item/get?itemid=${itemid}&shopid=${shopid}`;
-  const r = await fetchWithTimeout(api, {
-    headers: {
-      "User-Agent": UA,
-      "Referer": finalUrl,
-      "Accept": "application/json",
-      "x-api-source": "pc",
-      "x-shopee-language": "id",
-    },
+  const r = await shopeeFetch(api, env, {
+    "User-Agent": UA,
+    "Referer": finalUrl,
+    "Accept": "application/json",
+    "x-api-source": "pc",
+    "x-shopee-language": "id",
   });
   const body = await r.text();
 
@@ -187,7 +201,7 @@ async function handleTelegram(request, env) {
   }
 
   try {
-    const reply = await buildReply(textIn);
+    const reply = await buildReply(textIn, env);
     await sendMessage(env, chatId, reply);
   } catch (e) {
     await sendMessage(env, chatId, "Maaf, terjadi error: " + (e && e.message ? e.message : e));
@@ -204,7 +218,7 @@ function isAllowed(env, fromId, chatId) {
 }
 
 // Susun balasan bot dari teks pesan masuk.
-async function buildReply(textIn) {
+async function buildReply(textIn, env) {
   const t = textIn.trim();
   if (t === "/start" || t === "/help") {
     return "Halo! Kirim link produk Shopee, nanti aku balas harga terkininya.";
@@ -213,7 +227,7 @@ async function buildReply(textIn) {
   const link = extractShopeeLink(t);
   if (!link) return "Kirim link produk Shopee ya (mis. https://shopee.co.id/...-i.123.456).";
 
-  const info = await lookupPrice(link);
+  const info = await lookupPrice(link, env);
   return formatTelegram(info);
 }
 
@@ -227,7 +241,7 @@ function extractShopeeLink(s) {
 }
 
 // Ambil harga produk; kembalikan objek terstruktur (bukan dump debug).
-async function lookupPrice(rawLink) {
+async function lookupPrice(rawLink, env) {
   const link = normalizeUrl(rawLink);
   if (!link) return { ok: false, message: "URL tidak valid atau bukan domain Shopee." };
 
@@ -245,14 +259,12 @@ async function lookupPrice(rawLink) {
 
   const { shopid, itemid } = ids;
   const api = `https://shopee.co.id/api/v4/item/get?itemid=${itemid}&shopid=${shopid}`;
-  const r = await fetchWithTimeout(api, {
-    headers: {
-      "User-Agent": UA,
-      "Referer": finalUrl,
-      "Accept": "application/json",
-      "x-api-source": "pc",
-      "x-shopee-language": "id",
-    },
+  const r = await shopeeFetch(api, env, {
+    "User-Agent": UA,
+    "Referer": finalUrl,
+    "Accept": "application/json",
+    "x-api-source": "pc",
+    "x-shopee-language": "id",
   });
 
   let j;
