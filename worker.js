@@ -46,8 +46,8 @@ function text(s) {
 }
 
 // fetch dengan timeout, supaya request yang macet tetap gagal dengan rapi.
-async function fetchWithTimeout(url, options = {}) {
-  return fetch(url, { ...options, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+async function fetchWithTimeout(url, options = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+  return fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
 }
 
 // Fetch ke Shopee; kalau SCRAPER_API_KEY ada, lewatkan ScraperAPI supaya
@@ -60,9 +60,15 @@ async function shopeeFetch(targetUrl, env, headers = {}) {
       `api_key=${encodeURIComponent(env.SCRAPER_API_KEY)}` +
       `&url=${encodeURIComponent(targetUrl)}` +
       `&keep_headers=true`;
+    // Shopee sangat diproteksi -> butuh Ultra Premium (bisa dimatikan via
+    // SCRAPER_ULTRA=false). Perlu diingat: ultra premium memakai lebih banyak
+    // kredit per request.
+    if ((env.SCRAPER_ULTRA || "").trim().toLowerCase() !== "false") {
+      proxied += `&ultra_premium=true`;
+    }
     const country = (env.SCRAPER_COUNTRY || "").trim();
     if (country) proxied += `&country_code=${encodeURIComponent(country)}`;
-    return fetchWithTimeout(proxied, { headers });
+    return fetchWithTimeout(proxied, { headers }, 60000); // ultra premium bisa lambat
   }
   return fetchWithTimeout(targetUrl, { headers });
 }
